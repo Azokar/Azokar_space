@@ -1,25 +1,47 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import * as ImagePicker from 'expo-image-picker';
 import type { Session } from '@supabase/supabase-js';
-import { registerWithEmail, signInWithEmail, signOut } from '../src/lib/auth';
+import { getProfile, registerWithEmail, signInWithEmail, signOut, updateProfile, uploadAvatar, type UserProfile } from '../src/lib/auth';
 import { supabase } from '../src/lib/supabase';
+import DashboardScreen from '../src/screens/DashboardScreen';
+import FinanceScreen from '../src/screens/FinanceScreen';
+import HabitsScreen from '../src/screens/HabitsScreen';
+import TasksScreen from '../src/screens/TasksScreen';
+import MoonMark from '../src/components/MoonMark';
+import { Button, Field, Icon, Starfield, type IconName } from '../src/components/ui';
+import { colors, radius, space, type } from '../src/theme';
 
-const GREEN = '#16A34A';
-const INK = '#111827';
-const MUTED = '#6B7280';
-const LINE = '#E5E7EB';
-const habits = [
-  { id: '1', title: 'Leer 20 minutos', done: true, icon: '◫' },
-  { id: '2', title: 'Entrenar', done: true, icon: '↗' },
-  { id: '3', title: 'Tomar 2L de agua', done: false, icon: '◉' },
+type TabName = 'Inicio' | 'Finanzas' | 'Hábitos' | 'Tareas';
+const TABS: { name: TabName; icon: IconName }[] = [
+  { name: 'Inicio', icon: 'home' }, { name: 'Finanzas', icon: 'pie-chart' }, { name: 'Hábitos', icon: 'repeat' }, { name: 'Tareas', icon: 'check-square' },
 ];
 
+function readableProfileError(error: unknown) {
+  const record = error && typeof error === 'object' ? error as { message?: unknown; details?: unknown; hint?: unknown; code?: unknown } : null;
+  const message = [record?.message, record?.details, record?.hint].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' ');
+  if (/column .* does not exist|could not find .*column|schema cache/i.test(message)) {
+    return 'Faltan columnas en Supabase. Ejecuta supabase/migrations/20261022_profile_fields.sql en SQL Editor y vuelve a intentar.';
+  }
+  if (message) return `No se pudo guardar: ${message}${record?.code ? ` (${String(record.code)})` : ''}`;
+  return error instanceof Error ? `No se pudo guardar: ${error.message}` : `No se pudo guardar: ${JSON.stringify(error)}`;
+}
+
 export default function HomeScreen() {
-  const [tab, setTab] = useState('Inicio');
+  const [tab, setTab] = useState<TabName>('Inicio');
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
-  const completed = habits.filter(h => h.done).length;
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    const show = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setKeyboardOpen(true));
+    const hide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardOpen(false));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -36,46 +58,61 @@ export default function HomeScreen() {
     return () => { mounted = false; subscription.unsubscribe(); };
   }, []);
 
-  if (loading) return <SafeAreaView style={s.safe}><View style={s.loading}><ActivityIndicator color={GREEN} size="large" /></View></SafeAreaView>;
+  useEffect(() => {
+    const userId = session?.user.id;
+    if (!userId) { setProfile(null); return; }
+    let active = true;
+    getProfile(userId).then((nextProfile) => { if (active) setProfile(nextProfile); }).catch((error) => {
+      if (active) setToast({ message: readableProfileError(error), tone: 'error' });
+    });
+    return () => { active = false; };
+  }, [session?.user.id]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = setTimeout(() => setToast(null), 3200);
+    return () => clearTimeout(timeout);
+  }, [toast]);
+
+  if (loading) return <SafeAreaView style={s.safe}><Starfield /><View style={s.loading}><MoonMark size={56} /><ActivityIndicator color={colors.accent} style={{ marginTop: space.xl }} /></View></SafeAreaView>;
   if (!session) return <AuthScreen />;
 
+  const firstName = profile?.first_name || 'Explorador';
   return (
     <SafeAreaView style={s.safe}>
-      <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={s.page} showsVerticalScrollIndicator={false}>
+      <StatusBar style="light" />
+      <Starfield />
+      <KeyboardAvoidingView style={s.authFlex} behavior="padding">
+      <ScrollView contentContainerStyle={s.page} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         <View style={s.header}>
-          <View><Text style={s.eyebrow}>MIÉRCOLES, 21 DE OCTUBRE</Text><Text style={s.title}>Buen día, Alex <Text style={s.wave}>✳</Text></Text></View>
-          <TouchableOpacity style={s.avatar} onPress={() => signOut().catch(error => Alert.alert('No se pudo cerrar sesión', error.message))}><Text style={s.avatarText}>{(session.user.email?.[0] ?? 'A').toUpperCase()}</Text></TouchableOpacity>
+          <View style={s.headerCopy}>
+            <View style={s.brandRow}><MoonMark size={20} /><Text style={type.overline}>AZOKAR · SPACE</Text></View>
+            <Text style={s.title} numberOfLines={1}>{tab === 'Inicio' ? `Hola, ${firstName}` : tab}</Text>
+          </View>
+          <TouchableOpacity style={s.avatar} onPress={() => setProfileOpen(true)} accessibilityLabel="Abrir perfil">
+            {profile?.avatar_url ? <Image source={{ uri: profile.avatar_url }} style={s.avatarImage} /> : <Text style={s.avatarText}>{(profile?.first_name?.[0] ?? session.user.email?.[0] ?? 'A').toUpperCase()}</Text>}
+          </TouchableOpacity>
         </View>
 
-        <View style={s.balanceCard}>
-          <View style={s.cardTop}><Text style={s.cardLabel}>BALANCE DEL MES</Text><Text style={s.trend}>↗ 8.4%</Text></View>
-          <Text style={s.balance}>$2,480.50</Text>
-          <View style={s.balanceFoot}><Text style={s.balanceSub}>Ingresos <Text style={s.whiteStrong}>$3,200</Text></Text><View style={s.dot} /><Text style={s.balanceSub}>Gastos <Text style={s.whiteStrong}>$719.50</Text></Text></View>
-          <View style={s.progressTrack}><View style={s.progressFill} /></View>
-        </View>
-
-        <View style={s.sectionHead}><Text style={s.sectionTitle}>Accesos rápidos</Text><Text style={s.muted}>Hoy</Text></View>
-        <View style={s.quickRow}>
-          <Quick label="Registrar gasto" icon="−" tone="green" />
-          <Quick label="Nuevo hábito" icon="✳" tone="black" />
-          <Quick label="Añadir tarea" icon="＋" tone="outline" />
-        </View>
-
-        <View style={s.sectionHead}><Text style={s.sectionTitle}>Hábitos de hoy</Text><Text style={s.greenText}>{completed}/{habits.length} completados</Text></View>
-        <View style={s.panel}>
-          <View style={s.habitSummary}><View><Text style={s.percent}>67<Text style={s.percentUnit}>%</Text></Text><Text style={s.muted}>Tu progreso de hoy</Text></View><View style={s.successPill}><View style={s.pillDot} /><Text style={s.successText}>En camino</Text></View></View>
-          {habits.map((habit, i) => <View key={habit.id} style={[s.habitRow, i === 0 && s.firstRow]}><View style={s.habitIcon}><Text style={s.habitIconText}>{habit.icon}</Text></View><Text style={s.habitName}>{habit.title}</Text><TouchableOpacity style={[s.check, habit.done && s.checked]}><Text style={s.checkText}>{habit.done ? '✓' : ''}</Text></TouchableOpacity></View>)}
-        </View>
-
-        <View style={s.sectionHead}><Text style={s.sectionTitle}>Esta semana</Text><Text style={s.greenText}>Ver semana →</Text></View>
-        <View style={s.panel}>
-          <View style={s.statsRow}><Stat value="12" label="Programadas" /><View style={s.statDivider} /><Stat value="5" label="Pendientes" /><View style={s.statDivider} /><Stat value="7" label="Completadas" /></View>
-          <View style={s.taskLine}><View style={s.taskMark} /><View style={s.taskCopy}><Text style={s.taskTitle}>Preparar presupuesto</Text><Text style={s.taskDate}>HOY · 10:30</Text></View><Text style={s.arrow}>›</Text></View>
-        </View>
+        {tab === 'Inicio' && <DashboardScreen userId={session.user.id} onNavigate={next => setTab(next as TabName)} />}
+        {tab === 'Finanzas' && <FinanceScreen userId={session.user.id} />}
+        {tab === 'Hábitos' && <HabitsScreen userId={session.user.id} />}
+        {tab === 'Tareas' && <TasksScreen userId={session.user.id} />}
         <View style={s.bottomSpace} />
       </ScrollView>
-      <View style={s.nav}>{[['Inicio','⌂'],['Finanzas','◷'],['Hábitos','✳'],['Tareas','☷']].map(([name, icon]) => <TouchableOpacity key={name} style={s.navItem} onPress={() => setTab(name)}><Text style={[s.navIcon, tab === name && s.navSelected]}>{icon}</Text><Text style={[s.navLabel, tab === name && s.navSelected]}>{name}</Text></TouchableOpacity>)}</View>
+      {!keyboardOpen && <View style={s.nav}>
+        {TABS.map(({ name, icon }) => {
+          const active = tab === name;
+          return <TouchableOpacity key={name} activeOpacity={0.7} style={s.navItem} onPress={() => setTab(name)} accessibilityRole="tab" accessibilityState={{ selected: active }}>
+            <Icon name={icon} size={20} color={active ? colors.accent : colors.muted} />
+            <Text style={[s.navLabel, active && s.navLabelActive]}>{name}</Text>
+            <View style={[s.navDot, active && s.navDotActive]} />
+          </TouchableOpacity>;
+        })}
+      </View>}
+      </KeyboardAvoidingView>
+      <ProfileModal visible={profileOpen} profile={profile} userId={session.user.id} email={session.user.email ?? ''} onClose={() => setProfileOpen(false)} onSaved={(nextProfile) => { setProfile(nextProfile); setProfileOpen(false); setToast({ message: 'Cambios guardados con éxito', tone: 'success' }); }} />
+      {toast && <View pointerEvents="none" style={[s.toast, toast.tone === 'error' && s.toastError]}><Icon name={toast.tone === 'success' ? 'check-circle' : 'alert-triangle'} size={16} color={toast.tone === 'success' ? colors.accent : colors.danger} /><Text style={s.toastText}>{toast.message}</Text></View>}
     </SafeAreaView>
   );
 }
@@ -84,12 +121,14 @@ function AuthScreen() {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [busy, setBusy] = useState(false);
   const submit = async () => {
-    if (!email.trim() || !password) return Alert.alert('Faltan datos', 'Escribe tu correo y contraseña.');
+    if (!email.trim() || !password || (mode === 'signup' && (!firstName.trim() || !lastName.trim()))) return Alert.alert('Faltan datos', mode === 'signup' ? 'Completa nombre, apellido, correo y contraseña.' : 'Escribe tu correo y contraseña.');
     setBusy(true);
     try {
-      if (mode === 'signup') await registerWithEmail(email, password);
+      if (mode === 'signup') await registerWithEmail(email, password, firstName, lastName);
       else await signInWithEmail(email, password);
     } catch (error) {
       Alert.alert(mode === 'signup' ? 'No se pudo crear la cuenta' : 'No se pudo iniciar sesión', error instanceof Error ? error.message : 'Inténtalo de nuevo.');
@@ -97,35 +136,120 @@ function AuthScreen() {
   };
   return (
     <SafeAreaView style={s.safe}>
-      <StatusBar style="dark" />
-      <KeyboardAvoidingView style={s.authScreen} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={s.authMark}><Text style={s.authMarkText}>P</Text></View>
-        <Text style={s.authTitle}>{mode === 'signup' ? 'Crea tu cuenta' : 'Bienvenido de nuevo'}</Text>
-        <Text style={s.authSubtitle}>Tus finanzas, hábitos y semana en un solo lugar.</Text>
-        <Text style={s.inputLabel}>CORREO ELECTRÓNICO</Text>
-        <TextInput style={s.input} value={email} onChangeText={setEmail} placeholder="tu@correo.com" placeholderTextColor="#9CA3AF" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} textContentType="emailAddress" />
-        <Text style={s.inputLabel}>CONTRASEÑA</Text>
-        <TextInput style={s.input} value={password} onChangeText={setPassword} placeholder="Tu contraseña" placeholderTextColor="#9CA3AF" secureTextEntry textContentType={mode === 'signup' ? 'newPassword' : 'password'} />
-        <TouchableOpacity style={[s.authButton, busy && s.authButtonBusy]} onPress={submit} disabled={busy}>
-          {busy ? <ActivityIndicator color="#FFF" /> : <Text style={s.authButtonText}>{mode === 'signup' ? 'Crear cuenta' : 'Iniciar sesión'}</Text>}
-        </TouchableOpacity>
-        <TouchableOpacity style={s.authSwitch} onPress={() => setMode(mode === 'signup' ? 'signin' : 'signup')}>
-          <Text style={s.authSwitchText}>{mode === 'signup' ? '¿Ya tienes cuenta? ' : '¿Primera vez aquí? '}<Text style={s.authSwitchStrong}>{mode === 'signup' ? 'Inicia sesión' : 'Regístrate'}</Text></Text>
-        </TouchableOpacity>
+      <StatusBar style="light" />
+      <Starfield />
+      <KeyboardAvoidingView style={s.authFlex} behavior="padding">
+        <ScrollView contentContainerStyle={s.authScreen} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <View style={s.authMark}><MoonMark size={72} /></View>
+          <Text style={s.brandName}>AZOKAR SPACE</Text>
+          <Text style={s.authTitle}>{mode === 'signup' ? 'Crea tu cuenta' : 'Bienvenido de nuevo'}</Text>
+          <Text style={s.authSubtitle}>Tus finanzas, hábitos y semana en un solo lugar.</Text>
+          {mode === 'signup' && <>
+            <Field label="NOMBRE" value={firstName} onChangeText={setFirstName} placeholder="Tu nombre" autoCapitalize="words" autoCorrect={false} />
+            <Field label="APELLIDO" value={lastName} onChangeText={setLastName} placeholder="Tu apellido" autoCapitalize="words" autoCorrect={false} />
+          </>}
+          <Field label="CORREO ELECTRÓNICO" value={email} onChangeText={setEmail} placeholder="tu@correo.com" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} textContentType="emailAddress" />
+          <Field label="CONTRASEÑA" value={password} onChangeText={setPassword} placeholder="Tu contraseña" secureTextEntry textContentType={mode === 'signup' ? 'newPassword' : 'password'} />
+          <Button label={mode === 'signup' ? 'Crear cuenta' : 'Iniciar sesión'} onPress={submit} busy={busy} style={{ marginTop: space.xl }} />
+          <TouchableOpacity style={s.authSwitch} onPress={() => setMode(mode === 'signup' ? 'signin' : 'signup')}>
+            <Text style={s.authSwitchText}>{mode === 'signup' ? '¿Ya tienes cuenta? ' : '¿Primera vez aquí? '}<Text style={s.authSwitchStrong}>{mode === 'signup' ? 'Inicia sesión' : 'Regístrate'}</Text></Text>
+          </TouchableOpacity>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-function Quick({ label, icon, tone }: { label: string; icon: string; tone: string }) { return <TouchableOpacity style={s.quick}><View style={[s.quickIcon, tone === 'green' ? s.quickGreen : tone === 'black' ? s.quickBlack : s.quickOutline]}><Text style={[s.quickGlyph, tone === 'outline' && s.outlineGlyph]}>{icon}</Text></View><Text style={s.quickLabel}>{label}</Text></TouchableOpacity>; }
-function Stat({ value, label }: { value: string; label: string }) { return <View style={s.stat}><Text style={s.statValue}>{value}</Text><Text style={s.statLabel}>{label}</Text></View>; }
+function ProfileModal({ visible, profile, userId, email, onClose, onSaved }: { visible: boolean; profile: UserProfile | null; userId: string; email: string; onClose: () => void; onSaved: (profile: UserProfile) => void }) {
+  const [firstName, setFirstName] = useState(profile?.first_name ?? '');
+  const [lastName, setLastName] = useState(profile?.last_name ?? '');
+  const [pickedImage, setPickedImage] = useState<{ uri: string; base64: string; mimeType: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  useEffect(() => { setFirstName(profile?.first_name ?? ''); setLastName(profile?.last_name ?? ''); setPickedImage(null); }, [profile, visible]);
+  const choosePhoto = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.8, base64: true });
+      if (!result.canceled) {
+        const asset = result.assets[0];
+        if (!asset.base64) return Alert.alert('No se pudo leer la imagen', 'Elige otra imagen e inténtalo de nuevo.');
+        if (asset.fileSize && asset.fileSize > 5 * 1024 * 1024) return Alert.alert('Imagen muy grande', 'Elige una imagen de menos de 5 MB.');
+        setPickedImage({ uri: asset.uri, base64: asset.base64, mimeType: asset.mimeType ?? 'image/jpeg' });
+      }
+    } catch (error) { Alert.alert('No se pudo abrir la galería', error instanceof Error ? error.message : 'Inténtalo de nuevo.'); }
+  };
+  const save = async () => {
+    if (!firstName.trim() || !lastName.trim()) return Alert.alert('Faltan datos', 'El nombre y apellido son obligatorios.');
+    setBusy(true);
+    setFeedback('');
+    try {
+      const finalAvatarUrl = pickedImage ? await uploadAvatar(userId, pickedImage.base64, pickedImage.mimeType) : profile?.avatar_url ?? null;
+      const saved = await updateProfile({ id: userId, first_name: firstName, last_name: lastName, avatar_url: finalAvatarUrl });
+      onSaved(saved);
+    }
+    catch (error) { setFeedback(readableProfileError(error)); }
+    finally { setBusy(false); }
+  };
+  return <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+    <KeyboardAvoidingView style={s.authFlex} behavior="padding"><View style={s.modalBackdrop}><ScrollView contentContainerStyle={s.modalScroll} keyboardShouldPersistTaps="handled"><View style={s.profileSheet}>
+      <View style={s.grabber} />
+      <View style={s.profileHeading}>
+        <View style={{ flex: 1 }}><Text style={type.title}>Mi perfil</Text><Text style={[type.caption, { marginTop: 4 }]}>{email}</Text></View>
+        <TouchableOpacity onPress={onClose} hitSlop={10} accessibilityLabel="Cerrar"><Icon name="x" size={22} color={colors.muted} /></TouchableOpacity>
+      </View>
+      <TouchableOpacity activeOpacity={0.8} onPress={choosePhoto} disabled={busy} style={s.profileAvatar} accessibilityLabel="Elegir foto del dispositivo">
+        {pickedImage || profile?.avatar_url ? <Image source={{ uri: pickedImage?.uri ?? profile?.avatar_url ?? '' }} style={s.profileImage} /> : <Text style={s.profileAvatarText}>{(firstName[0] ?? 'A').toUpperCase()}</Text>}
+        <View style={s.cameraBadge}><Icon name="camera" size={13} color={colors.onAccent} /></View>
+      </TouchableOpacity>
+      <Text style={s.photoHint}>Toca para elegir una foto</Text>
+      <Field label="NOMBRE" value={firstName} onChangeText={setFirstName} placeholder="Tu nombre" autoCapitalize="words" />
+      <Field label="APELLIDO" value={lastName} onChangeText={setLastName} placeholder="Tu apellido" autoCapitalize="words" />
+      {!!feedback && <Text style={s.formError}>{feedback}</Text>}
+      <Button label="Guardar cambios" onPress={save} busy={busy} />
+      <Button label="Cerrar sesión" variant="danger" icon="log-out" onPress={() => signOut().catch(error => Alert.alert('No se pudo cerrar sesión', error.message))} style={{ marginTop: space.md }} />
+    </View></ScrollView></View></KeyboardAvoidingView>
+  </Modal>;
+}
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F8FAF8' }, page: { paddingHorizontal: 20, paddingTop: 12 }, header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 22 }, eyebrow: { color: MUTED, fontSize: 10, letterSpacing: 1.1, fontWeight: '700' }, title: { color: INK, fontSize: 24, fontWeight: '800', marginTop: 5 }, wave: { color: GREEN, fontSize: 21 }, avatar: { width: 42, height: 42, borderRadius: 15, backgroundColor: '#DCFCE7', justifyContent: 'center', alignItems: 'center' }, avatarText: { color: '#15803D', fontSize: 17, fontWeight: '800' },
-  balanceCard: { backgroundColor: '#111827', borderRadius: 24, padding: 20, marginBottom: 25 }, cardTop: { flexDirection: 'row', justifyContent: 'space-between' }, cardLabel: { color: '#A7F3D0', fontSize: 10, fontWeight: '800', letterSpacing: 1.1 }, trend: { color: '#86EFAC', fontSize: 12, fontWeight: '700' }, balance: { color: '#FFF', fontSize: 34, fontWeight: '800', marginTop: 12, letterSpacing: -1 }, balanceFoot: { flexDirection: 'row', alignItems: 'center', marginTop: 11 }, balanceSub: { color: '#9CA3AF', fontSize: 11 }, whiteStrong: { color: '#FFF', fontWeight: '700' }, dot: { width: 4, height: 4, borderRadius: 3, backgroundColor: '#4B5563', marginHorizontal: 10 }, progressTrack: { height: 5, borderRadius: 4, backgroundColor: '#374151', marginTop: 19 }, progressFill: { width: '72%', height: 5, borderRadius: 4, backgroundColor: '#4ADE80' },
-  sectionHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }, sectionTitle: { color: INK, fontSize: 16, fontWeight: '800' }, muted: { color: MUTED, fontSize: 12 }, greenText: { color: GREEN, fontSize: 12, fontWeight: '700' }, quickRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 25 }, quick: { width: '31%', alignItems: 'center' }, quickIcon: { height: 52, width: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center', marginBottom: 7 }, quickGreen: { backgroundColor: GREEN }, quickBlack: { backgroundColor: INK }, quickOutline: { backgroundColor: '#FFF', borderWidth: 1, borderColor: LINE }, quickGlyph: { color: '#FFF', fontSize: 23, fontWeight: '500' }, outlineGlyph: { color: INK }, quickLabel: { color: '#374151', fontSize: 10, fontWeight: '600', textAlign: 'center' },
-  panel: { backgroundColor: '#FFF', borderRadius: 20, borderWidth: 1, borderColor: '#EEF0EE', paddingHorizontal: 15, marginBottom: 24 }, habitSummary: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 14 }, percent: { color: INK, fontSize: 25, fontWeight: '800' }, percentUnit: { fontSize: 15 }, successPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0FDF4', borderRadius: 20, paddingVertical: 7, paddingHorizontal: 10 }, pillDot: { width: 6, height: 6, borderRadius: 4, backgroundColor: GREEN, marginRight: 6 }, successText: { color: '#15803D', fontSize: 10, fontWeight: '700' }, habitRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#F3F4F6' }, firstRow: { borderTopWidth: 0 }, habitIcon: { width: 32, height: 32, borderRadius: 11, backgroundColor: '#F3F4F6', justifyContent: 'center', alignItems: 'center' }, habitIconText: { color: GREEN, fontSize: 16 }, habitName: { color: '#374151', fontSize: 12, fontWeight: '600', flex: 1, marginLeft: 10 }, check: { width: 22, height: 22, borderRadius: 8, borderWidth: 1.5, borderColor: '#D1D5DB', justifyContent: 'center', alignItems: 'center' }, checked: { backgroundColor: GREEN, borderColor: GREEN }, checkText: { color: '#FFF', fontWeight: '800', fontSize: 13 },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16 }, stat: { flex: 1, alignItems: 'center' }, statValue: { color: INK, fontSize: 20, fontWeight: '800' }, statLabel: { color: MUTED, fontSize: 9, marginTop: 3 }, statDivider: { width: 1, height: 29, backgroundColor: LINE }, taskLine: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderTopWidth: 1, borderTopColor: '#F3F4F6' }, taskMark: { width: 17, height: 17, borderRadius: 6, borderWidth: 1.5, borderColor: GREEN }, taskCopy: { flex: 1, marginLeft: 10 }, taskTitle: { color: '#374151', fontSize: 12, fontWeight: '700' }, taskDate: { color: MUTED, fontSize: 9, marginTop: 4, letterSpacing: .5 }, arrow: { color: '#9CA3AF', fontSize: 22 }, bottomSpace: { height: 20 },
-  nav: { height: 66, backgroundColor: '#FFF', borderTopWidth: 1, borderColor: LINE, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' }, navItem: { alignItems: 'center', width: '25%' }, navIcon: { fontSize: 19, color: '#9CA3AF' }, navLabel: { color: '#9CA3AF', fontSize: 9, marginTop: 3, fontWeight: '600' }, navSelected: { color: GREEN, fontWeight: '800' },
-  loading: { flex: 1, alignItems: 'center', justifyContent: 'center' }, authScreen: { flex: 1, justifyContent: 'center', paddingHorizontal: 25 }, authMark: { width: 52, height: 52, borderRadius: 18, backgroundColor: GREEN, alignItems: 'center', justifyContent: 'center', marginBottom: 24 }, authMarkText: { color: '#FFF', fontSize: 26, fontWeight: '900' }, authTitle: { color: INK, fontSize: 27, fontWeight: '800', letterSpacing: -.5 }, authSubtitle: { color: MUTED, fontSize: 14, lineHeight: 20, marginTop: 8, marginBottom: 32 }, inputLabel: { color: '#4B5563', fontSize: 10, fontWeight: '800', letterSpacing: .9, marginBottom: 8, marginTop: 15 }, input: { height: 52, backgroundColor: '#FFF', borderWidth: 1, borderColor: LINE, borderRadius: 14, paddingHorizontal: 15, color: INK, fontSize: 14 }, authButton: { height: 54, marginTop: 25, borderRadius: 15, backgroundColor: GREEN, alignItems: 'center', justifyContent: 'center' }, authButtonBusy: { opacity: .75 }, authButtonText: { color: '#FFF', fontSize: 15, fontWeight: '800' }, authSwitch: { alignItems: 'center', paddingVertical: 20 }, authSwitchText: { color: MUTED, fontSize: 13 }, authSwitchStrong: { color: GREEN, fontWeight: '800' },
+  safe: { flex: 1, backgroundColor: colors.void },
+  loading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  page: { paddingHorizontal: 20, paddingTop: 16 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: space.xl },
+  headerCopy: { flex: 1, paddingRight: space.lg },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  title: { ...type.title, marginTop: 6 },
+  avatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.lineStrong, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  avatarImage: { width: 44, height: 44 },
+  avatarText: { color: colors.accent, fontSize: 17, fontWeight: '500' },
+  bottomSpace: { height: 28 },
+  nav: { flexDirection: 'row', backgroundColor: 'rgba(7, 11, 19, 0.96)', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, paddingTop: 10, paddingBottom: 8 },
+  navItem: { flex: 1, alignItems: 'center', gap: 4 },
+  navLabel: { color: colors.muted, fontSize: 10, fontWeight: '500', letterSpacing: 0.3 },
+  navLabelActive: { color: colors.accent },
+  navDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: 'transparent' },
+  navDotActive: { backgroundColor: colors.accent },
+  authFlex: { flex: 1 },
+  authScreen: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 26, paddingVertical: space.xxl },
+  authMark: { marginBottom: space.lg },
+  brandName: { color: colors.accent, fontSize: 11, fontWeight: '600', letterSpacing: 4, marginBottom: space.md },
+  authTitle: { ...type.display, fontSize: 34 },
+  authSubtitle: { ...type.body, color: colors.muted, lineHeight: 21, marginTop: space.sm, marginBottom: space.md },
+  authSwitch: { alignItems: 'center', paddingVertical: space.xl },
+  authSwitchText: { color: colors.muted, fontSize: 13 },
+  authSwitchStrong: { color: colors.accent, fontWeight: '600' },
+  modalBackdrop: { flex: 1, backgroundColor: colors.backdrop, justifyContent: 'flex-end' },
+  modalScroll: { flexGrow: 1, justifyContent: 'flex-end' },
+  profileSheet: { backgroundColor: colors.night, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.lineStrong, paddingHorizontal: 22, paddingTop: space.md, paddingBottom: 32 },
+  grabber: { alignSelf: 'center', width: 36, height: 4, borderRadius: 2, backgroundColor: colors.lineStrong, marginBottom: space.lg },
+  profileHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  profileAvatar: { width: 88, height: 88, borderRadius: 44, backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.lineStrong, alignSelf: 'center', marginTop: space.xl, justifyContent: 'center', alignItems: 'center' },
+  profileImage: { width: 88, height: 88, borderRadius: 44 },
+  profileAvatarText: { color: colors.accent, fontSize: 32, fontWeight: '300' },
+  cameraBadge: { position: 'absolute', right: -2, bottom: -2, width: 28, height: 28, borderRadius: 14, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: colors.night },
+  photoHint: { ...type.caption, textAlign: 'center', marginTop: space.md },
+  formError: { color: colors.danger, fontSize: 12, marginTop: space.md, lineHeight: 18 },
+  toast: { position: 'absolute', bottom: 88, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.lineStrong, paddingVertical: 13, paddingHorizontal: 18, borderRadius: radius.pill, maxWidth: '90%', elevation: 8 },
+  toastError: { borderColor: 'rgba(255, 138, 155, 0.4)' },
+  toastText: { color: colors.ink, fontSize: 13, fontWeight: '500', flexShrink: 1 },
 });
