@@ -15,3 +15,6 @@ android/key.properties
 
 expo-env.d.ts
 # @end expo-cli
+# Herramientas locales de agentes y skills (no forman parte de la app)
+.claude/
+skills-lock.json

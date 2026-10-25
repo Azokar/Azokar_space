@@ -1,0 +1,12 @@
+node_modules/
+.expo/
+.expo-bootstrap/
+dist/
+web-build/
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+android/key.properties
+.git/
