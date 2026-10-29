@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Pulso",
+    "name": "Azokar Space",
     "slug": "pulso",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -32,6 +32,14 @@
           "backgroundColor": "#080D18",
           "image": "./assets/images/azokar-splash.png",
           "imageWidth": 148
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Azokar Space usa el micrófono para registrar gastos, tareas y ejercicios con tu voz.",
+          "speechRecognitionPermission": "Azokar Space usa el reconocimiento de voz para entender lo que dices."
         }
       ]
     ],
