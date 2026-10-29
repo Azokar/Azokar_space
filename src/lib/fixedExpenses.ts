@@ -106,20 +106,17 @@ export function quincenaSummary(
   return { quincena, income, spent, reserved, fixedShare, available: cents(income - reserved - spent) };
 }
 
-/** Vista rápida de todos los gastos fijos del mes: % pagado, dinero reservado frente al faltante y vencidos. */
+/** Vista rápida de todos los gastos fijos del mes: % cubierto, dinero reservado frente al faltante y vencidos. */
 export function fixedOverview(expenses: FixedExpense[], periods: FixedPeriod[], today: string) {
   const monthPrefix = today.slice(0, 7);
   const ids = new Set(expenses.map(item => item.id));
   const monthPeriods = periods.filter(period => ids.has(period.fixed_expense_id) && period.period_start.startsWith(monthPrefix));
   const total = cents(expenses.reduce((sum, item) => sum + Number(item.monthly_amount), 0));
   const reserved = cents(monthPeriods.reduce((sum, period) => sum + Number(period.amount), 0));
-  const paid = cents(monthPeriods.filter(period => period.paid_at).reduce((sum, period) => sum + Number(period.amount), 0));
   return {
     total,
     reserved,
     missing: cents(Math.max(0, total - reserved)),
-    paid,
-    paidPercent: total > 0 ? Math.min(100, Math.round((paid / total) * 100)) : 0,
     reservedPercent: total > 0 ? Math.min(100, Math.round((reserved / total) * 100)) : 0,
     overdueCount: expenses.filter(item => expenseStatus(item, periods, today).overdue).length,
   };
