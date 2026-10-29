@@ -51,3 +51,14 @@ La pantalla inicial tiene formulario de registro e inicio de sesión con email y
 El esquema de `supabase/schema.sql` ya se ejecutó en el proyecto Supabase `Azokar` y las siete tablas quedaron creadas. Todas las tablas de usuario tienen RLS y políticas que restringen filas al usuario autenticado. La URL y la publishable key se configuran localmente en `.env.local`, excluido de Git; copia `.env.example` para otros entornos. Instala las dependencias móviles con `npx expo install @supabase/supabase-js @react-native-async-storage/async-storage react-native-url-polyfill`.
 
 En Supabase quedó habilitado el proveedor **Email**, permitido el registro de usuarios y desactivado **Confirm email** en Authentication → Sign In / Providers. El registro puede iniciar sesión de inmediato; las direcciones no quedan verificadas. Para un proyecto donde `schema.sql` ya estaba aplicado, ejecuta `supabase/migrations/20261022_profile_fields.sql` en Supabase → SQL Editor para añadir los campos del perfil, actualizar el trigger y configurar el bucket público `avatars` con políticas de escritura por usuario. Las pantallas financieras, hábitos y tareas consultan y guardan datos en Supabase.
+
+## Registro rápido por voz
+
+El botón flotante del micrófono permite decir una instrucción ("gasto de ocio 150 mil", "tarea mañana llamar al banco", "press de banca 60 kg 10 repeticiones"). El teléfono convierte la voz en texto, Gemini la interpreta y el registro se guarda solo, con aviso y opción de deshacer. Cada usuario pega su propia clave gratuita de Gemini en su perfil: se guarda cifrada en el almacén seguro del teléfono (`expo-secure-store`), nunca en Supabase, y viaja en una cabecera HTTPS hacia Google. La app valida lo que devuelve el modelo (fechas, montos, ejercicios existentes) antes de guardar. Requiere un build nativo (APK de EAS), no funciona en Expo Go.
+
+## Seguridad
+
+- Todas las tablas tienen RLS con políticas de "solo el dueño" (`user_id = auth.uid()`); la función `finance_totals` filtra por el usuario autenticado y no es ejecutable por anónimos.
+- El bucket `avatars` es público para mostrar las fotos por URL, pero solo cada usuario puede listar, subir, actualizar o borrar archivos de su carpeta (`supabase/migrations/20261101_security_hardening.sql`).
+- Las funciones de disparador de Auth no son invocables desde la API.
+- Nunca se usa la clave `service_role` en la app. Las claves van en `.env.local` y en variables de entorno de EAS, fuera de Git. Si encuentras una vulnerabilidad, avísalo en privado antes de publicarla.
