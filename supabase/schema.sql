@@ -170,3 +170,98 @@ alter table public.fixed_expense_periods enable row level security;
 
 create policy "fixed expense owner access" on public.fixed_expenses for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "fixed period owner access" on public.fixed_expense_periods for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Monthly spending limit (also in migrations/20261027_spending_limits.sql)
+create table public.spending_limits (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  monthly_amount numeric(12,2) not null check (monthly_amount > 0),
+  updated_at timestamptz not null default now()
+);
+alter table public.spending_limits enable row level security;
+create policy "spending limit owner access" on public.spending_limits for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Closed habit days for the "Camino a la Luna" points (also in migrations/20261028_habit_days.sql)
+create table public.habit_days (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  day date not null,
+  total smallint not null check (total > 0),
+  done smallint not null check (done >= 0),
+  successful boolean not null,
+  created_at timestamptz not null default now(),
+  primary key (user_id, day)
+);
+alter table public.habit_days enable row level security;
+create policy "habit day owner access" on public.habit_days for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Gym exercises and weight/reps history (also in migrations/20261029_exercises.sql)
+create table public.exercises (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 80),
+  category text not null default '' check (char_length(category) <= 40),
+  day_label text not null default '' check (char_length(day_label) <= 40),
+  created_at timestamptz not null default now(),
+  unique (id, user_id)
+);
+
+create table public.exercise_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  exercise_id uuid not null,
+  weight numeric(7,2) not null check (weight >= 0),
+  reps smallint not null check (reps between 1 and 999),
+  logged_at timestamptz not null default now(),
+  foreign key (exercise_id, user_id) references public.exercises(id, user_id) on delete cascade
+);
+
+create index exercises_user_idx on public.exercises(user_id);
+create index exercise_logs_exercise_idx on public.exercise_logs(exercise_id, logged_at desc);
+create index exercise_logs_user_idx on public.exercise_logs(user_id, logged_at desc);
+
+alter table public.exercises enable row level security;
+alter table public.exercise_logs enable row level security;
+
+create policy "exercise owner access" on public.exercises for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "exercise log owner access" on public.exercise_logs for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Tag per training day or routine (also in migrations/20261030_exercise_day_tags.sql)
+create table public.exercise_day_tags (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  day_label text not null check (char_length(day_label) between 1 and 40),
+  tag text not null check (char_length(tag) between 1 and 30),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, day_label)
+);
+alter table public.exercise_day_tags enable row level security;
+create policy "exercise day tag owner access" on public.exercise_day_tags for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Totals for the "Tu dinero" breakdown (also in migrations/20261031_finance_totals.sql)
+create or replace function public.finance_totals()
+returns table (income_total numeric, expense_total numeric, fixed_paid_total numeric, fixed_reserved_unpaid numeric, goals_total numeric)
+language sql
+stable
+security invoker
+set search_path = public
+as $$
+  select
+    coalesce((select sum(amount) from public.transactions where user_id = auth.uid() and kind = 'income'), 0),
+    coalesce((select sum(amount) from public.transactions where user_id = auth.uid() and kind = 'expense'), 0),
+    coalesce((select sum(amount) from public.fixed_expense_periods where user_id = auth.uid() and paid_at is not null), 0),
+    coalesce((select sum(amount) from public.fixed_expense_periods where user_id = auth.uid() and paid_at is null), 0),
+    coalesce((select sum(current_amount) from public.financial_goals where user_id = auth.uid()), 0);
+$$;
+
+revoke all on function public.finance_totals() from public, anon;
+grant execute on function public.finance_totals() to authenticated;
+
+-- Endurecimiento de seguridad (20261101_security_hardening)
+-- 1) Las funciones de disparador no deben poder llamarse desde la API (/rest/v1/rpc/...).
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
+revoke execute on function public.rls_auto_enable() from public, anon, authenticated;
+
+-- 2) Las fotos de perfil siguen viéndose por su URL pública (el bucket es público), pero ya no se puede
+--    listar el bucket completo: antes cualquiera podía enumerar los archivos y, con ellos, los ids de usuario.
+drop policy if exists "Avatar images are publicly readable" on storage.objects;
+create policy "Users read their own avatar" on storage.objects
+  for select to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text);
