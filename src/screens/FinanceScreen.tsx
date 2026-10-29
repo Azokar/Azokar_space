@@ -1,9 +1,16 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { ActivityIndicator, KeyboardAvoidingView, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../lib/supabase';
-import { Button, Card, Chip, EmptyState, ErrorText, Field, Icon, ProgressBar, SectionHeader } from '../components/ui';
+import { Button, Card, Chip, EmptyState, ErrorText, Field, Icon, ProgressBar, SectionHeader, ChipRow } from '../components/ui';
+import DatePickerField from '../components/DatePickerField';
 import FixedExpenseCard from '../components/FixedExpenseCard';
 import FixedExpensesAccordion from '../components/FixedExpensesAccordion';
+import GoalsAccordion from '../components/GoalsAccordion';
+import { goalsOverview } from '../lib/goals';
+import SpendingLimitCard from '../components/SpendingLimitCard';
+import MoneyBreakdownCard from '../components/MoneyBreakdownCard';
+import { limitSummary, type MoneyRow } from '../lib/spendingLimit';
 import { fixedOverview, quincenaOf, quincenaShare, quincenaSummary, toDateString, type FixedExpense, type FixedPeriod } from '../lib/fixedExpenses';
 import { colors, money, radius, space, type } from '../theme';
 
@@ -16,12 +23,13 @@ const INCOME_CATEGORIES = ['Salario', 'Ventas', 'Regalo', 'Otros'];
 const SALARY_CATEGORY = 'Salario';
 
 export default function FinanceScreen({ userId }: { userId: string }) {
+  const router = useRouter();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [modal, setModal] = useState<'transaction' | 'goal' | 'contribution' | 'fixed' | 'deleteFixed' | 'deleteTx' | 'deleteGoal' | null>(null);
+  const [modal, setModal] = useState<'transaction' | 'goal' | 'contribution' | 'fixed' | 'deleteFixed' | 'deleteGoal' | 'limit' | null>(null);
   const [kind, setKind] = useState<'income' | 'expense'>('expense');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
@@ -42,13 +50,20 @@ export default function FinanceScreen({ userId }: { userId: string }) {
   const [paidBusyId, setPaidBusyId] = useState('');
   const [editingFixed, setEditingFixed] = useState<FixedExpense | null>(null);
   const [pendingDelete, setPendingDelete] = useState<FixedExpense | null>(null);
-  const [pendingTx, setPendingTx] = useState<Transaction | null>(null);
   const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
   const [pendingGoal, setPendingGoal] = useState<Goal | null>(null);
   const [fixedWarning, setFixedWarning] = useState('');
   const [fixedOpen, setFixedOpen] = useState(false);
+  const [goalsOpen, setGoalsOpen] = useState(false);
+  const [limitMonthly, setLimitMonthly] = useState<number | null>(null);
+  // Movimientos del mes (ingresos y gastos): base del presupuesto de la quincena.
+  const [monthTx, setMonthTx] = useState<(MoneyRow & { kind: 'income' | 'expense' })[]>([]);
+  const [reloadCount, setReloadCount] = useState(0);
+  const [limitInput, setLimitInput] = useState('');
+  const [limitError, setLimitError] = useState('');
   const [notice, setNotice] = useState('');
   const today = toDateString(new Date());
+  const [txDate, setTxDate] = useState(today);
 
   const load = useCallback(async () => {
     setError('');
@@ -67,18 +82,29 @@ export default function FinanceScreen({ userId }: { userId: string }) {
     const fixedFailure = expenseRows.error ?? periodRows.error;
     if (fixedFailure) setFixedError(/fixed_expense|schema cache|does not exist|relation/i.test(fixedFailure.message) ? MISSING_TABLES : fixedFailure.message);
     else { setFixedError(''); setFixedExpenses((expenseRows.data ?? []) as FixedExpense[]); setPeriods((periodRows.data ?? []) as FixedPeriod[]); }
+    const monthStart = `${toDateString(new Date()).slice(0, 7)}-01`;
+    const [limitRow, expenseRows2] = await Promise.all([
+      supabase.from('spending_limits').select('monthly_amount').eq('user_id', userId).maybeSingle(),
+      supabase.from('transactions').select('kind, amount, occurred_on').eq('user_id', userId).gte('occurred_on', monthStart).limit(5000),
+    ]);
+    const limitFailure = limitRow.error ?? expenseRows2.error;
+    if (limitFailure) setLimitError(/spending_limits|schema cache|does not exist|relation/i.test(limitFailure.message) ? 'Falta la tabla del límite de gastos. Ejecuta supabase/migrations/20261027_spending_limits.sql en Supabase.' : limitFailure.message);
+    else { setLimitError(''); setLimitMonthly(limitRow.data ? Number(limitRow.data.monthly_amount) : null); setMonthTx((expenseRows2.data ?? []) as (MoneyRow & { kind: 'income' | 'expense' })[]); }
     setLoading(false);
+    setReloadCount(value => value + 1);
   }, [userId]);
-  useEffect(() => { void load(); }, [load]);
+  // Recarga al montar y cada vez que se vuelve a esta pantalla (por ejemplo, desde Movimientos).
+  useFocusEffect(useCallback(() => { void load(); }, [load]));
 
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const monthRows = transactions.filter(row => row.occurred_on.startsWith(currentMonth));
-  const income = monthRows.filter(row => row.kind === 'income').reduce((sum, row) => sum + Number(row.amount), 0);
-  const expenses = monthRows.filter(row => row.kind === 'expense').reduce((sum, row) => sum + Number(row.amount), 0);
 
   const quincena = quincenaOf(today);
+  // Solo un salario de la quincena actual reparte a gastos fijos (las reservas se calculan sobre ella).
+  const canDistribute = txDate >= quincena.start && txDate <= quincena.end;
   const overview = fixedOverview(fixedExpenses, periods, today);
-  const summary = quincenaSummary(fixedExpenses, periods, transactions, today);
+  const goalsSummary = goalsOverview(goals);
+  const limit = limitMonthly !== null ? limitSummary(limitMonthly, monthTx.filter(row => row.kind === 'expense'), fixedExpenses, monthTx.filter(row => row.kind === 'income'), today) : null;
+  const limitPreview = Number(limitInput.replace(',', '.'));
+  const summary = quincenaSummary(fixedExpenses, periods, monthTx, today);
   const incomePreview = Number(amount.replace(',', '.'));
   const missingShare = Math.round(fixedExpenses.filter(item => !periods.some(period => period.fixed_expense_id === item.id && period.period_start === quincena.start)).reduce((sum, item) => sum + quincenaShare(Number(item.monthly_amount), quincena.half), 0) * 100) / 100;
   const availableAfter = (extraIncome: number) => Math.round((summary.income + extraIncome - summary.reserved - missingShare - summary.spent) * 100) / 100;
@@ -86,6 +112,7 @@ export default function FinanceScreen({ userId }: { userId: string }) {
   const saveTransaction = async () => {
     const parsed = Number(amount.replace(',', '.'));
     if (!(parsed > 0)) return setError('Escribe un monto mayor que cero.');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(txDate) || txDate > today) return setError('Elige una fecha válida: hoy o una anterior.');
     setBusy(true); setError('');
     try {
       let category = categories.find(item => item.name === categoryName && item.kind === kind);
@@ -94,8 +121,8 @@ export default function FinanceScreen({ userId }: { userId: string }) {
         if (created.error) throw created.error;
         category = created.data as Category;
       }
-      const distributes = kind === 'income' && categoryName === SALARY_CATEGORY && splitIncome && fixedExpenses.length > 0;
-      const result = await supabase.from('transactions').insert({ user_id: userId, category_id: category.id, kind, amount: parsed, note: note.trim(), occurred_on: today, distributes_fixed: distributes }).select('id').single();
+      const distributes = kind === 'income' && categoryName === SALARY_CATEGORY && splitIncome && canDistribute && fixedExpenses.length > 0;
+      const result = await supabase.from('transactions').insert({ user_id: userId, category_id: category.id, kind, amount: parsed, note: note.trim(), occurred_on: txDate, distributes_fixed: distributes }).select('id').single();
       if (result.error) throw result.error;
       let message = '';
       if (distributes) {
@@ -113,7 +140,7 @@ export default function FinanceScreen({ userId }: { userId: string }) {
 
   const openFixedCreate = () => { setEditingFixed(null); setFixedName(''); setFixedAmount(''); setFixedDue(''); setError(''); setModal('fixed'); };
   const openFixedEdit = (expense: FixedExpense) => { setEditingFixed(expense); setFixedName(expense.name); setFixedAmount(String(expense.monthly_amount)); setFixedDue(String(expense.due_day)); setError(''); setModal('fixed'); };
-  const closeModal = () => { setModal(null); setError(''); setEditingFixed(null); setPendingDelete(null); setPendingTx(null); setEditingGoal(null); setPendingGoal(null); };
+  const closeModal = () => { setModal(null); setError(''); setEditingFixed(null); setPendingDelete(null); setEditingGoal(null); setPendingGoal(null); };
 
   const saveFixed = async () => {
     const monthly = Number(fixedAmount.replace(',', '.'));
@@ -150,42 +177,26 @@ export default function FinanceScreen({ userId }: { userId: string }) {
     else { setFixedWarning(''); closeModal(); await load(); }
   };
 
-  /**
-   * Elimina un movimiento y revierte todo lo derivado de él: el balance y el disponible se recalculan solos
-   * (se calculan desde los movimientos) y las reservas de gastos fijos creadas por ese ingreso se borran en cascada.
-   * Si en la misma quincena queda otro salario que repartía gastos fijos, ese salario recupera la reserva.
-   */
-  const deleteTransaction = async () => {
-    if (!pendingTx) return;
-    const target = pendingTx;
-    setBusy(true); setError('');
-    try {
-      const result = await supabase.from('transactions').delete().eq('id', target.id).eq('user_id', userId).select('id');
-      if (result.error) throw result.error;
-      if (!result.data || result.data.length === 0) throw new Error('No se pudo eliminar el movimiento. Recarga e inténtalo de nuevo.');
-      if (target.kind === 'income' && target.distributes_fixed) {
-        const q = quincenaOf(target.occurred_on);
-        const remaining = await supabase.from('transactions').select('id, created_at').eq('user_id', userId).eq('kind', 'income').eq('distributes_fixed', true).gte('occurred_on', q.start).lte('occurred_on', q.end).order('created_at').limit(1);
-        if (remaining.error) throw remaining.error;
-        const heir = remaining.data?.[0];
-        if (heir) {
-          const existing = await supabase.from('fixed_expense_periods').select('fixed_expense_id').eq('user_id', userId).eq('period_start', q.start);
-          if (existing.error) throw existing.error;
-          const covered = new Set((existing.data ?? []).map(row => row.fixed_expense_id as string));
-          const missing = fixedExpenses.filter(item => !covered.has(item.id) && item.created_at <= heir.created_at);
-          if (missing.length > 0) {
-            const restore = await supabase.from('fixed_expense_periods').upsert(missing.map(item => ({ user_id: userId, fixed_expense_id: item.id, period_start: q.start, amount: quincenaShare(Number(item.monthly_amount), q.half), source_transaction_id: heir.id })), { onConflict: 'fixed_expense_id,period_start', ignoreDuplicates: true });
-            if (restore.error) throw restore.error;
-          }
-        }
-      }
-      setNotice(''); closeModal(); await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo eliminar el movimiento.'); }
-    finally { setBusy(false); }
-  };
-
   const openGoalCreate = () => { setEditingGoal(null); setGoalName(''); setGoalTarget(''); setGoalDeadline(''); setError(''); setModal('goal'); };
   const openGoalEdit = (goal: Goal) => { setEditingGoal(goal); setGoalName(goal.name); setGoalTarget(String(goal.target_amount)); setGoalDeadline(goal.deadline ?? ''); setError(''); setModal('goal'); };
+
+  const openLimit = () => { setLimitInput(limitMonthly !== null ? String(limitMonthly) : ''); setError(''); setModal('limit'); };
+
+  const saveLimit = async () => {
+    const monthly = Number(limitInput.replace(',', '.'));
+    if (!(monthly > 0)) return setError('Escribe un límite mensual mayor que cero.');
+    setBusy(true); setError('');
+    const result = await supabase.from('spending_limits').upsert({ user_id: userId, monthly_amount: monthly, updated_at: new Date().toISOString() }, { onConflict: 'user_id' }).select('user_id');
+    setBusy(false);
+    if (result.error) setError(result.error.message); else { closeModal(); await load(); }
+  };
+
+  const removeLimit = async () => {
+    setBusy(true); setError('');
+    const result = await supabase.from('spending_limits').delete().eq('user_id', userId).select('user_id');
+    setBusy(false);
+    if (result.error) setError(result.error.message); else { closeModal(); await load(); }
+  };
 
   const saveGoal = async () => {
     const target = Number(goalTarget.replace(',', '.'));
@@ -223,15 +234,12 @@ export default function FinanceScreen({ userId }: { userId: string }) {
   };
 
   return <View>
-    <Card glow style={{ paddingVertical: space.xl }}>
-      <Text style={type.overline}>BALANCE DE ESTE MES</Text>
-      <Text style={styles.balance}>{money(income - expenses)}</Text>
-      <View style={styles.flowRow}>
-        <View style={styles.flow}><Icon name="arrow-down-left" size={14} color={colors.accent} /><Text style={styles.flowText}>{money(income)}</Text></View>
-        <View style={styles.flow}><Icon name="arrow-up-right" size={14} color={colors.danger} /><Text style={styles.flowText}>{money(expenses)}</Text></View>
-      </View>
-    </Card>
-    <Button label="Registrar movimiento" icon="plus" onPress={() => { setKind('expense'); setCategoryName(EXPENSE_CATEGORIES[0]); setError(''); setModal('transaction'); }} />
+    <MoneyBreakdownCard userId={userId} refreshKey={reloadCount} />
+    <Button label="Registrar movimiento" icon="plus" onPress={() => { setKind('expense'); setCategoryName(EXPENSE_CATEGORIES[0]); setTxDate(today); setError(''); setModal('transaction'); }} />
+    <View style={styles.navRow}>
+      <Button label="Movimientos" icon="list" variant="ghost" onPress={() => router.push('/movimientos')} style={styles.navButton} />
+      <Button label="Estadísticas" icon="trending-up" variant="ghost" onPress={() => router.push('/estadisticas')} style={styles.navButton} />
+    </View>
 
     <Card style={{ marginTop: space.lg }}>
       <View style={styles.qHeader}><Text style={type.overline}>QUINCENA · {quincena.label.toUpperCase()}</Text></View>
@@ -241,6 +249,8 @@ export default function FinanceScreen({ userId }: { userId: string }) {
       <View style={styles.qRow}><Text style={styles.qKey}>Reservado para gastos fijos</Text><Text style={styles.qVal}>− {money(summary.reserved)}</Text></View>
       <View style={styles.qRow}><Text style={styles.qKey}>Otros gastos</Text><Text style={styles.qVal}>− {money(summary.spent)}</Text></View>
     </Card>
+    <View style={{ marginTop: space.lg }}><SpendingLimitCard monthly={limitMonthly} summary={limit} onEdit={openLimit} /></View>
+    <ErrorText>{limitError}</ErrorText>
     {!!notice && <View style={styles.notice}><Icon name="check-circle" size={16} color={colors.accent} /><Text style={styles.noticeText}>{notice}</Text></View>}
 
     <FixedExpensesAccordion overview={overview} count={fixedExpenses.length} expanded={fixedOpen} onToggle={setFixedOpen} onAdd={openFixedCreate}>
@@ -250,48 +260,40 @@ export default function FinanceScreen({ userId }: { userId: string }) {
         : fixedExpenses.map(expense => <FixedExpenseCard key={expense.id} expense={expense} periods={periods} today={today} busy={paidBusyId === expense.id} onTogglePaid={() => togglePaid(expense)} onEdit={() => openFixedEdit(expense)} onDelete={() => { setPendingDelete(expense); setError(''); setModal('deleteFixed'); }} />)}
     </FixedExpensesAccordion>
 
-    <SectionHeader title="Metas financieras" action="Crear meta" onAction={openGoalCreate} />
-    {goals.length === 0 ? <EmptyState icon="target" text="Aún no tienes metas. Crea una para seguir tu progreso." /> : goals.map(goal => {
-      const progress = Math.min(100, Math.round(Number(goal.current_amount) / Number(goal.target_amount) * 100));
-      return <Card key={goal.id} style={{ marginBottom: space.md }}>
-        <View style={styles.goalHeader}><Text style={styles.goalName}>{goal.name}</Text><Text style={styles.goalPercent}>{progress}%</Text></View>
-        <View style={{ marginTop: space.md }}><ProgressBar percent={progress} /></View>
-        <Text style={[type.caption, { marginTop: space.md }]}>{money(Number(goal.current_amount))} de {money(Number(goal.target_amount))}{goal.deadline ? ` · Límite ${goal.deadline}` : ''}</Text>
-        <View style={styles.goalActions}>
-          <TouchableOpacity style={styles.contribute} onPress={() => { setSelectedGoal(goal); setError(''); setModal('contribution'); }}><Icon name="plus" size={14} color={colors.accent} /><Text style={styles.contributeText}>Aportar</Text></TouchableOpacity>
-          <View style={styles.iconRow}>
-            <TouchableOpacity onPress={() => openGoalEdit(goal)} hitSlop={8} style={styles.iconButton} accessibilityLabel={`Modificar meta ${goal.name}`}><Icon name="edit-2" size={16} color={colors.inkSoft} /></TouchableOpacity>
-            <TouchableOpacity onPress={() => { setPendingGoal(goal); setError(''); setModal('deleteGoal'); }} hitSlop={8} style={styles.iconButton} accessibilityLabel={`Eliminar meta ${goal.name}`}><Icon name="trash-2" size={16} color={colors.danger} /></TouchableOpacity>
+    <GoalsAccordion overview={goalsSummary} expanded={goalsOpen} onToggle={setGoalsOpen} onAdd={openGoalCreate}>
+      {goals.map(goal => {
+        const progress = Math.min(100, Math.round(Number(goal.current_amount) / Number(goal.target_amount) * 100));
+        return <Card key={goal.id} style={{ marginBottom: space.md }}>
+          <View style={styles.goalHeader}><Text style={styles.goalName}>{goal.name}</Text><Text style={styles.goalPercent}>{progress}%</Text></View>
+          <View style={{ marginTop: space.md }}><ProgressBar percent={progress} /></View>
+          <Text style={[type.caption, { marginTop: space.md }]}>{money(Number(goal.current_amount))} de {money(Number(goal.target_amount))}{goal.deadline ? ` · Límite ${goal.deadline}` : ''}</Text>
+          <View style={styles.goalActions}>
+            <TouchableOpacity style={styles.contribute} onPress={() => { setSelectedGoal(goal); setError(''); setModal('contribution'); }}><Icon name="plus" size={14} color={colors.accent} /><Text style={styles.contributeText}>Aportar</Text></TouchableOpacity>
+            <View style={styles.iconRow}>
+              <TouchableOpacity onPress={() => openGoalEdit(goal)} hitSlop={8} style={styles.iconButton} accessibilityLabel={`Modificar meta ${goal.name}`}><Icon name="edit-2" size={16} color={colors.inkSoft} /></TouchableOpacity>
+              <TouchableOpacity onPress={() => { setPendingGoal(goal); setError(''); setModal('deleteGoal'); }} hitSlop={8} style={styles.iconButton} accessibilityLabel={`Eliminar meta ${goal.name}`}><Icon name="trash-2" size={16} color={colors.danger} /></TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </Card>;
-    })}
+        </Card>;
+      })}
+    </GoalsAccordion>
 
-    <SectionHeader title="Movimientos recientes" />
-    {loading ? <ActivityIndicator color={colors.accent} style={{ margin: 24 }} /> : transactions.length === 0 ? <EmptyState icon="credit-card" text="Todavía no hay ingresos ni gastos registrados." /> : <Card style={styles.list}>{transactions.map((row, index) => {
-      const category = categories.find(item => item.id === row.category_id)?.name ?? 'Sin categoría';
-      const isIncome = row.kind === 'income';
-      return <View key={row.id} style={[styles.txRow, index > 0 && styles.txDivider]}>
-        <View style={[styles.txIcon, isIncome && styles.txIconIncome]}><Icon name={isIncome ? 'arrow-down-left' : 'arrow-up-right'} size={16} color={isIncome ? colors.accent : colors.danger} /></View>
-        <View style={styles.txCopy}><Text style={styles.txTitle} numberOfLines={1}>{row.note || category}</Text><Text style={type.caption}>{category} · {row.occurred_on}</Text></View>
-        <Text style={[styles.txAmount, isIncome && { color: colors.accent }]}>{isIncome ? '+' : '−'}{money(Number(row.amount))}</Text>
-        <TouchableOpacity onPress={() => { setPendingTx(row); setError(''); setModal('deleteTx'); }} hitSlop={8} style={styles.txDelete} accessibilityLabel={`Eliminar movimiento ${row.note || category}`}><Icon name="trash-2" size={15} color={colors.muted} /></TouchableOpacity>
-      </View>;
-    })}</Card>}
     {!modal && <ErrorText>{error}</ErrorText>}
 
     <Modal visible={modal !== null} transparent animationType="slide" onRequestClose={closeModal}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding"><View style={styles.backdrop}><ScrollView contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled"><View style={styles.sheet}>
         <View style={styles.grabber} />
-        <View style={styles.modalHeader}><Text style={type.title}>{modal === 'transaction' ? 'Nuevo movimiento' : modal === 'goal' ? (editingGoal ? 'Modificar meta' : 'Nueva meta') : modal === 'deleteGoal' ? 'Eliminar meta' : modal === 'fixed' ? (editingFixed ? 'Modificar gasto fijo' : 'Nuevo gasto fijo') : modal === 'deleteFixed' ? 'Eliminar gasto fijo' : modal === 'deleteTx' ? 'Eliminar movimiento' : 'Añadir aporte'}</Text><TouchableOpacity onPress={closeModal} hitSlop={10}><Icon name="x" size={22} color={colors.muted} /></TouchableOpacity></View>
+        <View style={styles.modalHeader}><Text style={type.title}>{modal === 'transaction' ? 'Nuevo movimiento' : modal === 'goal' ? (editingGoal ? 'Modificar meta' : 'Nueva meta') : modal === 'deleteGoal' ? 'Eliminar meta' : modal === 'fixed' ? (editingFixed ? 'Modificar gasto fijo' : 'Nuevo gasto fijo') : modal === 'deleteFixed' ? 'Eliminar gasto fijo' : modal === 'limit' ? 'Límite de gastos' : 'Añadir aporte'}</Text><TouchableOpacity onPress={closeModal} hitSlop={10}><Icon name="x" size={22} color={colors.muted} /></TouchableOpacity></View>
         {modal === 'transaction' && <>
           <View style={styles.segmentRow}>{(['expense', 'income'] as const).map(value => <TouchableOpacity key={value} activeOpacity={0.8} style={[styles.segment, kind === value && styles.segmentSelected]} onPress={() => { setKind(value); setCategoryName(value === 'expense' ? EXPENSE_CATEGORIES[0] : INCOME_CATEGORIES[0]); }}><Text style={[styles.segmentText, kind === value && styles.segmentTextSelected]}>{value === 'expense' ? 'Gasto' : 'Ingreso'}</Text></TouchableOpacity>)}</View>
           <Field label="MONTO" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0" />
           <Text style={[type.overline, { marginTop: space.lg, marginBottom: 8 }]}>CATEGORÍA</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>{(kind === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map(name => <Chip key={name} label={name} selected={name === categoryName} onPress={() => setCategoryName(name)} />)}</ScrollView>
+          <ChipRow scroll>{(kind === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map(name => <Chip key={name} label={name} selected={name === categoryName} onPress={() => setCategoryName(name)} />)}</ChipRow>
+          <DatePickerField label="FECHA" value={txDate} onChange={setTxDate} maxDate={today} />
           <Field label="NOTA (OPCIONAL)" value={note} onChangeText={setNote} placeholder="Descripción" />
           {kind === 'income' && categoryName !== SALARY_CATEGORY && fixedExpenses.length > 0 && <Text style={[type.caption, { marginTop: space.lg }]}>Los gastos fijos solo se cubren con ingresos de salario; este ingreso no se reparte.</Text>}
-          {kind === 'income' && categoryName === SALARY_CATEGORY && fixedExpenses.length > 0 && <View style={styles.splitBox}>
+          {kind === 'income' && categoryName === SALARY_CATEGORY && fixedExpenses.length > 0 && !canDistribute && <Text style={[type.caption, { marginTop: space.lg }]}>Este salario es de otra quincena: solo los de la quincena actual reparten a tus gastos fijos.</Text>}
+          {kind === 'income' && categoryName === SALARY_CATEGORY && fixedExpenses.length > 0 && canDistribute && <View style={styles.splitBox}>
             <View style={styles.splitRow}>
               <View style={{ flex: 1 }}><Text style={type.heading}>Pago quincenal</Text><Text style={[type.caption, { marginTop: 3 }]}>Reservar la parte de la quincena de tus gastos fijos</Text></View>
               <Chip label={splitIncome ? 'Sí' : 'No'} selected={splitIncome} onPress={() => setSplitIncome(value => !value)} />
@@ -312,15 +314,13 @@ export default function FinanceScreen({ userId }: { userId: string }) {
           <Button label="Eliminar" variant="danger" icon="trash-2" onPress={confirmDeleteFixed} busy={busy} />
           <Button label="Cancelar" variant="ghost" onPress={closeModal} style={{ marginTop: space.md }} />
         </>}
-        {modal === 'deleteTx' && pendingTx && <>
-          <Text style={[type.body, { marginTop: space.md, lineHeight: 21 }]}>
-            {pendingTx.kind === 'income' ? 'Ingreso' : 'Gasto'} de {money(Number(pendingTx.amount))} ({pendingTx.note || categories.find(item => item.id === pendingTx.category_id)?.name || 'Sin categoría'}, {pendingTx.occurred_on}).
-          </Text>
-          <Text style={[type.caption, { marginTop: space.md, lineHeight: 19 }]}>
-            Se restará del balance{pendingTx.kind === 'income' && pendingTx.distributes_fixed ? ' y se revertirá el reparto a tus gastos fijos: sus barras de progreso volverán al nivel anterior' : ''}. Esta acción no se puede deshacer.
-          </Text>
-          <Button label="Eliminar movimiento" variant="danger" icon="trash-2" onPress={deleteTransaction} busy={busy} />
-          <Button label="Cancelar" variant="ghost" onPress={closeModal} style={{ marginTop: space.md }} />
+        {modal === 'limit' && <>
+          <Text style={[type.body, { marginTop: space.md, lineHeight: 21 }]}>Define cuánto quieres gastar como máximo en el mes. Se divide a partes iguales entre las dos quincenas.</Text>
+          <Field label="LÍMITE MENSUAL" value={limitInput} onChangeText={setLimitInput} keyboardType="decimal-pad" placeholder="0" />
+          {limitPreview > 0 && <Text style={styles.splitPreview}>{money(quincenaShare(limitPreview, 1))} en la quincena 1–15 y {money(quincenaShare(limitPreview, 2))} en la 16–fin de mes</Text>}
+          <Text style={[type.caption, { marginTop: space.md, lineHeight: 18 }]}>Los gastos fijos programados se descuentan del límite desde que los creas, estén pagados o no. Lo que queda es para gastos variables.</Text>
+          <Button label="Guardar límite" onPress={saveLimit} busy={busy} />
+          {limitMonthly !== null && <Button label="Quitar límite" variant="danger" icon="trash-2" onPress={removeLimit} busy={busy} style={{ marginTop: space.md }} />}
         </>}
         {modal === 'deleteGoal' && pendingGoal && <>
           <Text style={[type.body, { marginTop: space.md, lineHeight: 21 }]}>¿Eliminar la meta "{pendingGoal.name}"? Llevas {money(Number(pendingGoal.current_amount))} de {money(Number(pendingGoal.target_amount))}. Se borrará junto con sus aportes. Esta acción no se puede deshacer.</Text>
@@ -363,20 +363,14 @@ const styles = StyleSheet.create({
   goalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   goalName: { ...type.heading, flex: 1 },
   goalPercent: { color: colors.accent, fontSize: 18, fontWeight: '300' },
+  navRow: { flexDirection: 'row', gap: space.md, marginTop: space.md },
+  navButton: { flex: 1, marginTop: 0 },
   goalActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.md },
   iconRow: { flexDirection: 'row', gap: space.sm },
-  iconButton: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
+  iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
   contribute: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 14, borderRadius: radius.pill, backgroundColor: colors.accentGlow },
   contributeText: { color: colors.accent, fontSize: 12, fontWeight: '600' },
   list: { paddingVertical: 4, paddingHorizontal: space.lg },
-  txRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13 },
-  txDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  txIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.dangerSoft, alignItems: 'center', justifyContent: 'center' },
-  txIconIncome: { backgroundColor: colors.accentGlow },
-  txCopy: { flex: 1, marginLeft: space.md, gap: 3 },
-  txTitle: { color: colors.ink, fontSize: 14 },
-  txDelete: { marginLeft: space.md, width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
-  txAmount: { color: colors.inkSoft, fontSize: 14, fontWeight: '500', fontVariant: ['tabular-nums'] },
   backdrop: { flex: 1, backgroundColor: colors.backdrop, justifyContent: 'flex-end' },
   modalScroll: { flexGrow: 1, justifyContent: 'flex-end' },
   sheet: { backgroundColor: colors.night, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.lineStrong, padding: 22, paddingBottom: 32 },
